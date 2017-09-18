@@ -1,0 +1,273 @@
+    #!jinja2
+[cylc]
+    UTC mode = True 
+    # Timeout handlers
+    [[event hooks]]
+        timeout handler = "rose suite-hook --mail --shutdown"
+        timeout = 10080 # 7 days, 168 hours, 10080 minutes
+
+
+[scheduling]
+    [[queues]]
+      [[[test_queue]]]
+        limit = 18
+        members = QUEUE_CAP
+
+    [[dependencies]]
+        graph = """{% for number, dict_item in EXPERIMENT.items() %}
+                    {% for key2, sample in dict_item.items() %}
+                     create_workdir =>  fastqc_{{ sample }} => check_{{ sample}} => bwa_{{ sample }} => view_{{ sample }} => sort_{{ sample }} =>
+                      index_{{ sample }} => removedup_{{ sample }} => bamtoolsRMdup_{{ sample }} => index2_{{ sample }}
+                     index_{{ sample }} => alignmentmetrics_{{ sample }} 
+                     index_{{ sample }} => insertsizemetrics_{{ sample }}
+                     index_{{ sample }} => dontremovedup_{{ sample }} => bamtoolsMARKdup_{{ sample }}
+                     {% endfor %}
+                    TEST5:succeed-all => macs2_{{ number }} => rm_blacklist_{{ number }}  
+                   {% endfor %}"""
+
+[runtime]
+# Root, inherited by everything
+    [[root]]
+        initial scripting = """
+            export CYLC_VERSION={{CYLC_VERSION}}
+            export ROSE_VERSION={{ROSE_VERSION}}
+            """
+
+        environment scripting = "eval $(rose task-env)"
+        command scripting = "rose task-run --verbose"
+        [[[event hooks]]]
+            succeeded handler = "rose suite-hook"
+            failed handler = "rose suite-hook"
+            retry handler = "rose suite-hook --mail"
+            submission failed handler = "rose suite-hook --mail"
+            submission timeout = 720 # 12 hours
+            submission timeout handler = "rose suite-hook --mail"
+            execution timeout  = 2880 # 48 hours
+            execution timeout handler = "rose suite-hook --mail"
+
+    [[LOGIN_NODE_TASK]]     ## jobs for the login node
+        [[[remote]]]
+            host = $(rose host-select {{ HOST_HPC }})
+            
+    [[QUEUE_CAP]]
+
+    [[PBS_WORKQ]]
+    [[[job submission]]]            ## jobs for the farm
+           method = pbs
+        [[[remote]]]
+            host = $(rose host-select {{ HOST_HPC }})
+        [[[directives]]]
+            -l select={{ N_NODES_WORKQ }}:ncpus={{ N_CPUS_WORKQ }}:mem={{ MEMORY_WORKQ }}
+            -l walltime={{ WALLTIME_WORKQ }}
+            -q = workq
+            -P = {{ PROJECT_CODE }}
+
+    [[PBS_SERIAL]]                      ## jobs for the farm
+        [[[job submission]]]
+           method = pbs
+        [[[remote]]]
+            host = $(rose host-select {{ HOST_HPC }})
+        [[[directives]]]
+            -l select={{ N_NODES_SERIAL }}:mem={{ MEMORY_SERIAL }}
+            -l walltime={{ WALLTIME_SERIAL }}
+            -q = serial
+            -P = {{ PROJECT_CODE }}
+
+    [[SAMTOOLS]]
+        inherit = PBS_SERIAL
+        pre-command scripting = """module load rose
+                                   module load python/2.7.3
+                                   module load samtools/1.3.1"""
+       [[[environment]]]
+           ROSE_TASK_APP = samtools
+           WORKING_DIR = {{ WORKING_DIR }}
+           PROJECT_NAME = {{ PROJECT_NAME }}
+           ALIGN_DIR = {{ ALIGN_DIR }}
+
+
+    [[PICARD]]
+        inherit = PBS_SERIAL
+        pre-command scripting = """module load rose
+                                   module load java/1.8.0_45
+                                   module load picard/2.7.1
+                                   module load R/3.1.0"""
+       [[[environment]]]
+           ROSE_TASK_APP = picard
+           WORKING_DIR = {{ WORKING_DIR }}
+           PROJECT_NAME = {{ PROJECT_NAME }}
+           ALIGN_DIR = {{ ALIGN_DIR }}
+           QC_DIR = {{ QC_DIR }}
+
+    [[BAMTOOLS]]
+        inherit = PBS_SERIAL
+        pre-command scripting = """module load rose
+                                   module load bamtools/2.3.0"""
+       [[[environment]]]
+           ROSE_TASK_APP = bamtools
+           WORKING_DIR = {{ WORKING_DIR }}
+           PROJECT_NAME = {{ PROJECT_NAME }}
+           ALIGN_DIR = {{ ALIGN_DIR }}
+           QC_DIR = {{ QC_DIR }}
+
+    [[BEDTOOLS]]
+        inherit = PBS_SERIAL
+        pre-command scripting = """module load rose
+                                   module load bedtools/2.24.0"""
+       [[[environment]]]
+           ROSE_TASK_APP = bedtools
+           WORKING_DIR = {{ WORKING_DIR }}
+           PROJECT_NAME = {{ PROJECT_NAME }}
+           ALIGN_DIR = {{ ALIGN_DIR }}
+           OUTPUT_DIR = {{ OUTPUT_DIR }}    
+           
+
+    [[create_workdir]]
+            inherit = LOGIN_NODE_TASK
+        [[[environment]]]
+            ROSE_TASK_APP = create_workdir
+            WORKING_DIR = {{ WORKING_DIR }}
+            PROJECT_NAME = {{ PROJECT_NAME }}
+            INPUT_DIR = {{ INPUT_DIR }}
+            ALIGN_DIR = {{ ALIGN_DIR }}
+            QC_DIR = {{ QC_DIR }}
+            OUTPUT_DIR = {{ OUTPUT_DIR }}
+            TMP_DIR = {{ TMP_DIR }}
+            RESOURCES_DIR = {{ RESOURCES_DIR }}
+
+    [[TEST5]]
+
+    {% for key, dict_item in EXPERIMENT.items() %}
+      {% for key2, sample in dict_item.items() %}
+
+      [[fastqc_{{ sample }}]]
+          inherit = PBS_SERIAL, QUEUE_CAP
+          pre-command scripting = """module load rose
+                                     module load fastqc/0.11.2
+                                     module load java/1.8.0_45"""
+         [[[environment]]]
+              ROSE_TASK_APP = fastqc
+              WORKING_DIR = {{ WORKING_DIR }}
+              PROJECT_NAME = {{ PROJECT_NAME }}
+              INPUT_LOCATION = {{ INPUT_DATA_PWD }}
+              QC_DIR = {{ QC_DIR }}
+              SAMPLE_ID = {{ sample }}
+
+      [[bwa_{{ sample }}]]
+          inherit = PBS_WORKQ, QUEUE_CAP
+          pre-command scripting = """module load rose
+                                     module load BWA/0.7.10"""
+         [[[environment]]]
+             ROSE_TASK_APP = bwa
+             WORKING_DIR = {{ WORKING_DIR }}
+             PROJECT_NAME = {{ PROJECT_NAME }}
+             INPUT_LOCATION = {{ INPUT_DATA_PWD }}
+             ALIGN_DIR = {{ ALIGN_DIR }}
+             SAMPLE_ID = {{ sample }}
+             REF_GENOME = {{ REF_GENOME }}
+
+      [[view_{{ sample }}]]
+          inherit = SAMTOOLS, QUEUE_CAP
+          script=rose task-run --command-key=view
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+
+      [[sort_{{ sample }}]]
+          inherit = SAMTOOLS, QUEUE_CAP
+          script=rose task-run --command-key=sort
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+
+      [[index_{{ sample }}]]
+          inherit = SAMTOOLS, QUEUE_CAP
+          script=rose task-run --command-key=index
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+
+      [[alignmentmetrics_{{ sample }}]]
+          inherit = PICARD, QUEUE_CAP
+          script=rose task-run --command-key=alignmentmetrics
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+              REF_GENOME = {{ REF_GENOME }}
+
+  # does not make the histogram because of R plot issue with java -- can't change -- but can make it yourself from output data
+  # need to somehow figure out to have it be okay that it fails -- or something
+      [[insertsizemetrics_{{ sample }}]]
+          inherit = PICARD, QUEUE_CAP
+          script=rose task-run --command-key=insertsizemetrics --fail-mode=continue
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+
+      [[dontremovedup_{{ sample }}]]
+          inherit = PICARD, QUEUE_CAP
+          script=rose task-run --command-key=dontremovedup
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+
+      [[bamtoolsMARKdup_{{ sample }}]]        
+          inherit = BAMTOOLS, QUEUE_CAP
+          script=rose task-run --command-key=bamtoolsMARKdup
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+
+      [[removedup_{{ sample }}]]
+          inherit = PICARD, QUEUE_CAP
+          script=rose task-run --command-key=removedup
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+
+      [[bamtoolsRMdup_{{ sample }}]]   
+          inherit = BAMTOOLS, QUEUE_CAP
+          script=rose task-run --command-key=bamtoolsRMdup
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+
+      [[index2_{{ sample }}]]
+          inherit = SAMTOOLS, QUEUE_CAP. TEST5
+          script=rose task-run --command-key=index2
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+              
+      {% endfor %}
+
+    [[macs2_{{ number }}]]
+        inherit = PBS_SERIAL, QUEUE_CAP
+        pre-command scripting = """module load rose
+                                   module load macs2/2.1.0.20150420"""
+       [[[environment]]]
+           ROSE_TASK_APP = macs2
+           WORKING_DIR = {{ WORKING_DIR }}
+           PROJECT_NAME = {{ PROJECT_NAME }}
+           INPUT_LOCATION = {{ INPUT_DATA_PWD }}
+           ALIGN_DIR = {{ ALIGN_DIR }}
+           OUTPUT_DIR = {{ OUTPUT_DIR }}
+           QVALUE = {{ QVALUE }}
+           {% for key2, sample in dict_item.items() %}
+              {% if key2 == "test" %}
+                TEST = {{ sample }}
+              {% endif %}
+              {% if key2 == "control" %}
+                CONTROL = {{ sample }}
+              {% endif %}
+            {% endfor %}
+
+    [[rm_blacklist_{{ number }}]]
+        inherit = BEDTOOLS, QUEUE_CAP
+        script=rose task-run --command-key=rm_blacklist
+       [[[environment]]]
+           WORKING_DIR = {{ WORKING_DIR }}
+           PROJECT_NAME = {{ PROJECT_NAME }}
+           INPUT_LOCATION = {{ INPUT_DATA_PWD }}
+           ALIGN_DIR = {{ ALIGN_DIR }}
+           OUTPUT_DIR = {{ OUTPUT_DIR }}
+           QVALUE = {{ QVALUE }}
+           {% for key2, sample in dict_item.items() %}
+              {% if key2 == "test" %}
+                TEST = {{ sample }}
+              {% endif %}
+              {% if key2 == "control" %}
+                CONTROL = {{ sample }}
+              {% endif %}
+            {% endfor %}  
+
+    {% endfor %} 

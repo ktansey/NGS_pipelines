@@ -1,0 +1,254 @@
+#!jinja2
+[cylc]
+    UTC mode = True 
+    # Timeout handlers
+    [[event hooks]]
+        timeout handler = "rose suite-hook --mail --shutdown"
+        timeout = 10080 # 7 days, 168 hours, 10080 minutes
+
+
+[scheduling]
+    [[queues]]
+      [[[test_queue]]]
+        limit = 18
+        members = QUEUE_CAP
+
+    [[dependencies]]
+        graph = """{% for sample in DATA_INFO %}
+                      create_workdir => copy_bowtie_ref
+                      copy_bowtie_ref:fail => create_bowtie_ref
+                      copy_bowtie_ref => !create_bowtie_ref 
+                      copy_bowtie_ref | create_bowtie_ref => copy_bowtie_gtf_index
+                      copy_bowtie_gtf_index:fail => create_bowtie_gtf_index
+                      copy_bowtie_gtf_index => !create_bowtie_gtf_index
+                      create_workdir => fastqc_{{ sample }} 
+                      copy_bowtie_gtf_index | create_bowtie_gtf_index & FASTQC:succeed => tophat2_{{ sample }} => cufflinksFPKM_{{ sample }}
+                   {% endfor %}
+                   {% for key,dict_item in EXPERIMENT.items() %}
+                     FPKM:succeed-all => cuffDiff_{{ key }}
+                   {% endfor %}
+                   """
+
+[runtime]
+# Root, inherited by everything
+    [[root]]
+        initial scripting = """
+            export CYLC_VERSION={{CYLC_VERSION}}
+            export ROSE_VERSION={{ROSE_VERSION}}
+            """
+
+        environment scripting = "eval $(rose task-env)"
+        command scripting = "rose task-run --verbose"
+        [[[event hooks]]]
+            succeeded handler = "rose suite-hook"
+            failed handler = "rose suite-hook"
+            retry handler = "rose suite-hook --mail"
+            submission failed handler = "rose suite-hook --mail"
+            submission timeout = 720 # 12 hours
+            submission timeout handler = "rose suite-hook --mail"
+            execution timeout  = 2880 # 48 hours
+            execution timeout handler = "rose suite-hook --mail"
+
+    [[LOGIN_NODE_TASK]]     ## jobs for the login node
+        [[[remote]]]
+            host = $(rose host-select {{ HOST_HPC }})
+
+    [[QUEUE_CAP]]
+
+    [[PBS_WORKQ_1]]
+      [[[job submission]]]            ## jobs for the farm
+           method = pbs
+        [[[remote]]]
+            host = $(rose host-select {{ HOST_HPC }})
+        [[[directives]]]
+            -l select={{ N_NODES_WORKQ }}:ncpus={{ N_CPUS_WORKQ }}:mem={{ MEMORY_WORKQ }}
+            -l walltime={{ WALLTIME_WORKQ }}
+            -q = workq
+            -P = {{ PROJECT_CODE }}
+
+    [[PBS_SERIAL_LONG]]                      ## jobs for the farm, serial long queue
+        [[[job submission]]]
+           method = pbs
+        [[[remote]]]
+            host = $(rose host-select {{ HOST_HPC }})
+        [[[directives]]]
+            -l select={{ N_NODES_SERIAL }}:mem={{ MEMORY_SERIAL }}
+            -l walltime={{ WALLTIME_SERIAL_LONG }}
+            -q = serial
+            -P = {{ PROJECT_CODE }}
+
+    [[PBS_SERIAL_SHORT]]                      ## jobs for the farm, serial queue, short jobs
+        [[[job submission]]]
+           method = pbs
+        [[[remote]]]
+            host = $(rose host-select {{ HOST_HPC }})
+        [[[directives]]]
+            -l select={{ N_NODES_SERIAL }}:mem={{ MEMORY_SERIAL }}
+            -l walltime={{ WALLTIME_SERIAL_SHORT }}
+            -q = serial
+            -P = {{ PROJECT_CODE }}
+
+    [[FPKM]]
+
+    [[CUFFLINKS]]
+        inherit = PBS_SERIAL_LONG
+        pre-command scripting = """module load rose
+                                   cufflinks/2.2.1"""
+       [[[environment]]]
+           ROSE_TASK_APP = bedtools
+           WORKING_DIR = {{ WORKING_DIR }}
+           PROJECT_NAME = {{ PROJECT_NAME }}
+           ALIGN_DIR = {{ ALIGN_DIR }}
+           OUTPUT_DIR = {{ OUTPUT_DIR }}  
+
+    [[create_workdir]]
+            inherit = LOGIN_NODE_TASK
+        [[[environment]]]
+            ROSE_TASK_APP = create_workdir
+            WORKING_DIR = {{ WORKING_DIR }}
+            PROJECT_NAME = {{ PROJECT_NAME }}
+            INPUT_DIR = {{ INPUT_DIR }}
+            ALIGN_DIR = {{ ALIGN_DIR }}
+            QC_DIR = {{ QC_DIR }}
+            OUTPUT_DIR = {{ OUTPUT_DIR }}
+            TMP_DIR = {{ TMP_DIR }}
+            RESOURCES_DIR = {{ RESOURCES_DIR }}
+
+    [[copy_bowtie_ref]]          ## copy over the genome.fasta and bowtie indices
+            inherit = PBS_SERIAL_SHORT 
+            pre-command scripting = """module load rose
+                                       module load tophat/2.0.11"""
+        [[[environment]]]
+            ROSE_TASK_APP = copy_bowtie_ref
+            WORKING_DIR = {{ WORKING_DIR }}
+            PROJECT_NAME = {{ PROJECT_NAME }}
+            RESOURCES_DIR = {{ RESOURCES_DIR }}
+            GENOME_NAME = {{ GENOME_NAME | replace(".fa", "") }}    ## regex_replace(), try replace .fa first
+            GENOME_DIR = {{ GENOME_DIR }}    ## take this from GENOME_NAME by parsing out directory stem
+
+    [[create_bowtie_ref]]          ## create bowtie indices for genome.fasta 
+            inherit = PBS_WORKQ_1 
+            pre-command scripting = """module load rose
+                                       module load tophat/2.0.11"""
+        [[[environment]]]
+            ROSE_TASK_APP = create_bowtie_ref
+            WORKING_DIR = {{ WORKING_DIR }}
+            PROJECT_NAME = {{ PROJECT_NAME }}
+            RESOURCES_DIR = {{ RESOURCES_DIR }}
+            GENOME_NAME = {{ GENOME_NAME | replace(".fa", "") }}    ## regex_replace(), try replace .fa first
+            GENOME_DIR = {{ GENOME_DIR }}    ## take this from GENOME_NAME by parsing out directory stem
+
+    [[copy_bowtie_gtf_index]]             ## create or copy over the genome.gtf and index 
+            inherit = PBS_SERIAL_SHORT
+            pre-command scripting = """module load rose
+                                       module load tophat/2.0.11"""
+        [[[environment]]]
+            ROSE_TASK_APP = create_bowtie_gtf_index
+            WORKING_DIR = {{ WORKING_DIR }}
+            PROJECT_NAME = {{ PROJECT_NAME }}
+            RESOURCES_DIR = {{ RESOURCES_DIR }}
+            GTF_NAME = {{ GTF_NAME | replace(".gtf", "") }}
+            GTF_DIR = {{ GTF_DIR }}
+
+    [[create_bowtie_gtf_index]]             ## create or copy over the genome.gtf and index 
+            inherit = PBS_WORKQ_1
+            pre-command scripting = """module load rose
+                                       module load tophat/2.0.11"""
+        [[[environment]]]
+            ROSE_TASK_APP = create_bowtie_gtf_index
+            WORKING_DIR = {{ WORKING_DIR }}
+            REF_GTF = {{ REF_GTF }}
+            PROJECT_NAME = {{ PROJECT_NAME }}
+            RESOURCES_DIR = {{ RESOURCES_DIR }}
+            GENOME_NAME = {{ GENOME_NAME | replace(".fa", "") }}    ## regex_replace(), try replace .fa first
+            GENOME_DIR = {{ GENOME_DIR }}    ## take this from GENOME_NAME by parsing out directory stem
+            GTF_NAME = {{ GTF_NAME | replace(".gtf", "") }}
+            GTF_DIR = {{ GTF_DIR }}
+
+    {% for sample in DATA_INFO %}
+
+      [[fastqc_{{ sample }}]]
+          inherit = PBS_WORKQ_1, QUEUE_CAP
+          pre-command scripting = """module load rose
+                                     module load fastqc/0.11.2
+                                     module load java/1.8.0_45"""
+         [[[environment]]]
+              ROSE_TASK_APP = fastqc
+              WORKING_DIR = {{ WORKING_DIR }}
+              PROJECT_NAME = {{ PROJECT_NAME }}
+              INPUT_LOCATION = {{ INPUT_DATA_PWD }}
+              QC_DIR = {{ QC_DIR }}
+              SAMPLE_ID = {{ sample }}
+              N_THREADS = {{ N_CPUS_WORKQ }}
+
+      [[tophat2_{{ sample }}]]
+          inherit = PBS_WORKQ_1, QUEUE_CAP
+          pre-command scripting = """module load rose
+                                     module load tophat/2.0.11"""
+         [[[environment]]]
+              ROSE_TASK_APP = tophat2
+              WORKING_DIR = {{ WORKING_DIR }}
+              PROJECT_NAME = {{ PROJECT_NAME }}
+              INPUT_LOCATION = {{ INPUT_DATA_PWD }}
+              ALIGN_DIR = {{ ALIGN_DIR }}
+              RESOURCES_DIR = {{ RESOURCES_DIR }}
+              SAMPLE_ID = {{ sample }}
+              GENOME_NAME = {{ GENOME_NAME }}
+              N_THREADS = {{ N_CPUS_WORKQ }} 
+              FASTQ_EXTENSION = {{ FASTQ_EXTENSION }}
+              FASTQ_R1 = {{ FASTQ_R1 }}
+              FASTQ_R2 = {{ FASTQ_R2 }}
+
+      [[cufflinksFPKM_{{ sample }}]]
+          inherit = CUFFLINKS, FPKM, QUEUE_CAP
+          pre-command scripting = """module load rose
+                                     module load cufflinks/2.2.1"""
+          script=rose task-run --command-key=cufflinksFPKM
+         [[[environment]]]
+              ROSE_TASK_APP = cufflinks
+              WORKING_DIR = {{ WORKING_DIR }}
+              PROJECT_NAME = {{ PROJECT_NAME }}
+              ALIGN_DIR = {{ ALIGN_DIR }}
+              RESOURCES_DIR = {{ RESOURCES_DIR }}
+              OUTPUT_DIR = {{ OUTPUT_DIR }}
+              SAMPLE_ID = {{ sample }}
+              GENOME_NAME = {{ GENOME_NAME }}
+              N_THREADS = {{ N_CPUS_WORKQ }}
+              GTF_NAME = {{ GTF_NAME }}
+
+    {% endfor %} 
+
+    {% for key,dict_item in EXPERIMENT.items() %}
+
+      [[cuffDiff_{{ key }}]]
+          inherit = CUFFLINKS, QUEUE_CAP
+          pre-command scripting = """module load rose
+                                     module load cufflinks/2.2.1"""
+          script=rose task-run --command-key=cuffDiff
+         [[[environment]]]
+              ROSE_TASK_APP = cufflinks
+              WORKING_DIR = {{ WORKING_DIR }}
+              PROJECT_NAME = {{ PROJECT_NAME }}
+              INPUT_LOCATION = {{ INPUT_DATA_PWD }}
+              ALIGN_DIR = {{ ALIGN_DIR }}
+              REF_GENOME = {{ REF_GENOME }}
+              N_THREADS = {{ N_CPUS_WORKQ }}
+              INPUT_LOCATION = {{ INPUT_DATA_PWD }} 
+              GTF_NAME = {{ GTF_NAME }}
+              RESOURCES_DIR = {{ RESOURCES_DIR }}
+              {% for key2, nested_value in dict_item.items() %}
+                {% if key2 == 'test' %}
+                  TEST = {{ nested_value }}
+                {% endif %}
+                {% if key2 == 'control' %}
+                  CONTROL = {{ nested_value }}
+                {% endif %}
+              {% endfor %}
+
+    {% endfor %}            
+
+
+
+
+
+

@@ -1,0 +1,454 @@
+#!jinja2
+[cylc]
+    UTC mode = True 
+    # Timeout handlers
+    [[event hooks]]
+        timeout handler = "rose suite-hook --mail --shutdown"
+        timeout = 10080 # 7 days, 168 hours, 10080 minutes
+
+
+[scheduling]
+    [[queues]]
+      [[[test_queue]]]
+        limit = 15
+        members = QUEUE_CAP
+
+    [[dependencies]]
+        graph = """{% for sample in DATA_INFO %}
+                      create_workdir =>  fastqc_{{ sample }} => bwa_{{ sample }} => view_{{ sample }} => sort_{{ sample }} => index_{{ sample }} => addReadGroupInfo_{{ sample }} => markdup1_{{ sample }} => index2_{{ sample }} => baserecal1_{{ sample }} => printreads_{{ sample }} => index4_{{ sample }} => hapCaller_{{ sample }} 
+                      index_{{ sample }} =>  alignmentmetrics_{{ sample }} 
+                      index_{{ sample }} => insertsizemetrics_{{ sample }}
+                      index_{{ sample }} =>  bamSumamryDK_{{ sample }}
+                      index2_{{ sample }} => validateSam_{{ sample }}
+                      index4_{{ sample }} => bamSumamryDK2_{{ sample }}
+                      index4_{{ sample }} =>  coverageBed_{{ sample }}
+                      baserecal1_{{ sample }} => baserecal2_{{ sample }} => BQSRplots_{{ sample }}
+                   {% endfor %}
+                    HAP_DONE:succeed-all => makelist_bam => makelist_vcf 
+                   {% for num in range(1,CHR) %} # will this work????
+                    VCF_DONE:succeed-all => jointgeno_{{ num }} 
+                   {% endfor %}
+                   GVCF_DONE:succeed-all => makelist_vcf_2  => catvariants => vqsrSNP => applyVSQRsnp => vsqrIndel => applyVSQRindel => posteriors => variantFilter => variantAnnotator
+                   """
+
+[runtime]
+# Root, inherited by everything
+    [[root]]
+        initial scripting = """
+            export CYLC_VERSION={{CYLC_VERSION}}
+            export ROSE_VERSION={{ROSE_VERSION}}
+            """
+
+        environment scripting = "eval $(rose task-env)"
+        command scripting = "rose task-run --verbose"
+        [[[event hooks]]]
+            succeeded handler = "rose suite-hook"
+            failed handler = "rose suite-hook"
+            retry handler = "rose suite-hook --mail"
+            submission failed handler = "rose suite-hook --mail"
+            submission timeout = 720 # 12 hours
+            submission timeout handler = "rose suite-hook --mail"
+            execution timeout  = 2880 # 48 hours
+            execution timeout handler = "rose suite-hook --mail"
+
+    [[LOGIN_NODE_TASK]]     ## jobs for the login node
+        [[[remote]]]
+            host = $(rose host-select {{ HOST_HPC }})
+
+    [[QUEUE_CAP]]
+
+    [[HAP_DONE]]
+
+    [[VCF_DONE]]
+
+    [[GVCF_DONE]]
+
+    [[PBS_WORKQ_1]]
+      [[[job submission]]]            ## jobs for the farm
+           method = pbs
+        [[[remote]]]
+            host = $(rose host-select {{ HOST_HPC }})
+        [[[directives]]]
+            -l select={{ N_NODES_WORKQ }}:ncpus={{ N_CPUS_WORKQ }}:mem={{ MEMORY_WORKQ }}
+            -l walltime={{ WALLTIME_WORKQ }}
+            -q = workq
+            -P = {{ PROJECT_CODE }}
+
+    [[PBS_WORKQ_2]]
+      [[[job submission]]]            ## jobs for the farm
+           method = pbs
+        [[[remote]]]
+            host = $(rose host-select {{ HOST_HPC }})
+        [[[directives]]]
+            -l select={{ N_NODES_WORKQ2 }}:ncpus={{ N_CPUS_WORKQ }}:mem={{ MEMORY_WORKQ }}
+            -l walltime={{ WALLTIME_WORKQ2 }}
+            -q = workq
+            -P = {{ PROJECT_CODE }}
+
+    [[WGP_WORKQ_1]]
+      [[[job submission]]]            ## jobs for the farm
+           method = pbs
+        [[[remote]]]
+            host = $(rose host-select {{ HOST_HPC }})
+        [[[directives]]]
+            -l select={{ N_NODES_WORKQ }}:ncpus={{ N_CPUS_WGP1 }}:mem={{ MEMORY_WGP_WORKQ1 }}
+            -l walltime={{ WALLTIME_WORKQ }}
+            -q = workq_wgp
+            -P = {{ PROJECT_CODE }}
+
+#    [[WGP_WORKQ_2]]
+#      [[[job submission]]]            ## jobs for the farm
+#           method = pbs
+#        [[[remote]]]
+#            host = $(rose host-select {{ HOST_HPC }})
+#        [[[directives]]]
+#            -l select={{ N_NODES_WORKQ2 }}:ncpus={{ N_CPUS_WGP2 }}:mem={{ MEMORY_WGP_WORKQ2 }}
+#            -l walltime={{ WALLTIME_WORKQ2 }}
+#            -q = workq_wgp
+#            -P = {{ PROJECT_CODE }}
+#
+    [[PBS_SERIAL]]                      ## jobs for the farm
+        [[[job submission]]]
+           method = pbs
+        [[[remote]]]
+            host = $(rose host-select {{ HOST_HPC }})
+        [[[directives]]]
+            -l select={{ N_NODES_SERIAL }}:mem={{ MEMORY_SERIAL }}
+            -l walltime={{ WALLTIME_SERIAL }}
+            -q = serial
+            -P = {{ PROJECT_CODE }}
+
+# maybe split samtools into two things -- one on the workq and one on the serial
+# the serial for indexing which is not multi threaded
+    [[SAMTOOLS]]
+        pre-command scripting = """module load python/2.7.3
+                                   module load samtools/1.3.1"""
+       [[[environment]]]
+           ROSE_TASK_APP = samtools
+           WORKING_DIR = {{ WORKING_DIR }}
+           PROJECT_NAME = {{ PROJECT_NAME }}
+           ALIGN_DIR = {{ ALIGN_DIR }}
+
+    [[PICARD]]
+        pre-command scripting = """module load rose
+                                   module load java/1.8.0_45
+                                   module load picard/2.7.1
+                                   module load R/3.0.1"""
+       [[[environment]]]
+           ROSE_TASK_APP = picard
+           WORKING_DIR = {{ WORKING_DIR }}
+           PROJECT_NAME = {{ PROJECT_NAME }}
+           ALIGN_DIR = {{ ALIGN_DIR }}
+           QC_DIR = {{ QC_DIR }}
+
+    [[BAMTOOLS]]
+        pre-command scripting = """module load rose
+                                   module load bamtools/2.3.0"""
+       [[[environment]]]
+           ROSE_TASK_APP = bamtools
+           WORKING_DIR = {{ WORKING_DIR }}
+           PROJECT_NAME = {{ PROJECT_NAME }}
+           ALIGN_DIR = {{ ALIGN_DIR }}
+           QC_DIR = {{ QC_DIR }}
+
+    [[GATK]]
+        pre-command scripting = """module load rose
+                                   module load GATK/3.7
+                                   module load R/3.3.0"""
+       [[[environment]]]
+           ROSE_TASK_APP = gatk
+           WORKING_DIR = {{ WORKING_DIR }}
+           PROJECT_NAME = {{ PROJECT_NAME }}
+           ALIGN_DIR = {{ ALIGN_DIR }}
+           QC_DIR = {{ QC_DIR }}
+           OUTPUT_DIR = {{ OUTPUT_DIR }}
+           REF_GENOME = {{ REF_GENOME }}
+           DBSNP = {{ DBSNP144 }}
+           INDEL = {{ INDEL }}
+           INDEL2 = {{ INDEL2 }}
+           HAPMAP = {{ HAPMAP33 }}  
+           OMNI = {{ OMNI25 }}    
+           G1000 = {{ G1000P1 }}     
+           KEY = {{ KEY }}
+           TMP = {{ TMP_DIR }}
+
+    [[BEDTOOLS]]
+        pre-command scripting = """module load rose
+                                   module load bedtools/2.26.0"""
+       [[[environment]]]
+           ROSE_TASK_APP = bedtools
+           WORKING_DIR = {{ WORKING_DIR }}
+           PROJECT_NAME = {{ PROJECT_NAME }}
+           ALIGN_DIR = {{ ALIGN_DIR }}
+           OUTPUT_DIR = {{ OUTPUT_DIR }} 
+           QC_DIR = {{ QC_DIR }}
+
+
+    [[create_workdir]]
+            inherit = LOGIN_NODE_TASK
+        [[[environment]]]
+            ROSE_TASK_APP = create_workdir
+            WORKING_DIR = {{ WORKING_DIR }}
+            PROJECT_NAME = {{ PROJECT_NAME }}
+            INPUT_DIR = {{ INPUT_DIR }}
+            ALIGN_DIR = {{ ALIGN_DIR }}
+            QC_DIR = {{ QC_DIR }}
+            OUTPUT_DIR = {{ OUTPUT_DIR }}
+            TMP_DIR = {{ TMP_DIR }}
+            RESOURCES_DIR = {{ RESOURCES_DIR }}
+
+    {% for sample in DATA_INFO %}
+
+      [[fastqc_{{ sample }}]]
+          inherit = PBS_WORKQ_1, QUEUE_CAP
+          pre-command scripting = """module load rose
+                                     module load fastqc/0.11.2
+                                     module load java/1.8.0_45"""
+         [[[environment]]]
+              ROSE_TASK_APP = fastqc
+              WORKING_DIR = {{ WORKING_DIR }}
+              PROJECT_NAME = {{ PROJECT_NAME }}
+              INPUT_LOCATION = {{ INPUT_DATA_PWD }}
+              QC_DIR = {{ QC_DIR }}
+              SAMPLE_ID = {{ sample }}
+              N_THREADS = 4
+              N_CPUS_WORKQ = 4
+              FASTQ_EXTENSION = {{ FASTQ_EXTENSION }}
+              FASTQ_R1 = {{ FASTQ_R1 }}
+              FASTQ_R2 = {{ FASTQ_R2 }}
+
+      [[trimmomatic_{{ sample }}]]
+          inherit = PBS_SERIAL, QUEUE_CAP
+          pre-command scripting = """module load rose
+                                     module load java
+                                     module load trimmomatic/0.35"""
+         [[[environment]]]
+             ROSE_TASK_APP = trimmomatic
+             WORKING_DIR = {{ WORKING_DIR }}
+             PROJECT_NAME = {{ PROJECT_NAME }}
+             INPUT_LOCATION = {{ INPUT_DATA_PWD }}
+             ALIGN_DIR = {{ ALIGN_DIR }}
+             SAMPLE_ID = {{ sample }}
+             FASTQ_EXTENSION = {{ FASTQ_EXTENSION }}
+             FASTQ_R1 = {{ FASTQ_R1 }}
+             FASTQ_R2 = {{ FASTQ_R2 }}
+
+      [[bwa_{{ sample }}]]
+          inherit = PBS_WORKQ_1, QUEUE_CAP
+          pre-command scripting = """module load rose
+                                     module load BWA/0.7.15"""
+         [[[environment]]]
+             ROSE_TASK_APP = bwa
+             WORKING_DIR = {{ WORKING_DIR }}
+             PROJECT_NAME = {{ PROJECT_NAME }}
+             INPUT_LOCATION = {{ INPUT_DATA_PWD }}
+             ALIGN_DIR = {{ ALIGN_DIR }}
+             SAMPLE_ID = {{ sample }}
+             REF_GENOME = {{ REF_GENOME }}
+             N_THREADS = {{ N_CPUS_WORKQ }} 
+             FASTQ_EXTENSION = {{ FASTQ_EXTENSION }}
+             FASTQ_R1 = {{ FASTQ_R1 }}
+             FASTQ_R2 = {{ FASTQ_R2 }}
+
+      [[view_{{ sample }}]]
+          inherit = SAMTOOLS, PBS_WORKQ_1, QUEUE_CAP
+          script=rose task-run --command-key=view
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+              N_THREADS = {{ N_CPUS_WORKQ }}
+
+      [[sort_{{ sample }}]]
+          inherit = SAMTOOLS, PBS_WORKQ_1, QUEUE_CAP
+          script=rose task-run --command-key=sort
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+              N_THREADS = {{ N_CPUS_WORKQ }}
+
+      [[index_{{ sample }}]]
+          inherit = SAMTOOLS, PBS_SERIAL, QUEUE_CAP
+          script=rose task-run --command-key=index
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+
+      [[alignmentmetrics_{{ sample }}]]
+          inherit = PICARD, PBS_SERIAL, QUEUE_CAP
+          script=rose task-run --command-key=alignmentmetrics
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+              REF_GENOME = {{ REF_GENOME }}
+
+      [[insertsizemetrics_{{ sample }}]]
+          inherit = PICARD, PBS_SERIAL, QUEUE_CAP
+          script=rose task-run --command-key=insertsizemetrics
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+ 
+      [[bamSumamryDK_{{ sample }}]]
+          inherit = SAMTOOLS, PBS_SERIAL, QUEUE_CAP
+          script=rose task-run --command-key=bamSummaryDK
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+              QC_DIR = {{ QC_DIR }}
+
+# does this get added????
+      [[addReadGroupInfo_{{ sample }}]]
+          inherit = PICARD, PBS_SERIAL, QUEUE_CAP
+          script=rose task-run --command-key=addReadGroupInfo
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+              ID = {{ sample }}
+              LANE = {{ sample }}
+
+      [[markdup1_{{ sample }}]]
+        inherit = PICARD, PBS_SERIAL, QUEUE_CAP
+        script=rose task-run --command-key=markdup1
+        [[[environment]]]
+            SAMPLE_ID = {{ sample }}
+
+      [[index2_{{ sample }}]]
+          inherit = SAMTOOLS, PBS_SERIAL, QUEUE_CAP
+          script=rose task-run --command-key=index2
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+
+      [[validateSam_{{ sample }}]]
+          inherit = PICARD, PBS_SERIAL, QUEUE_CAP
+          script=rose task-run --command-key=validateSam
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+
+      [[baserecal1_{{ sample }}]]
+          inherit = GATK, PBS_WORKQ_1, QUEUE_CAP
+          script=rose task-run --command-key=baseRecalibrator1
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+              N_CPUS = {{ N_CPUS_WORKQ }}
+
+      [[printreads_{{ sample }}]]
+          inherit = GATK, PBS_WORKQ_1, QUEUE_CAP
+          script=rose task-run --command-key=printReads
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+              N_CPUS = {{ N_CPUS_WORKQ }}
+
+      [[baserecal2_{{ sample }}]]
+          inherit = GATK, PBS_WORKQ_1, QUEUE_CAP
+          script=rose task-run --command-key=baseRecalibrator2
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+              N_CPUS = {{ N_CPUS_WORKQ }}
+
+      [[BQSRplots_{{ sample }}]]
+          inherit = GATK, PBS_SERIAL, QUEUE_CAP
+          script=rose task-run --command-key=BQSRplots
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}      
+    
+      [[index4_{{ sample }}]]
+          inherit = SAMTOOLS, PBS_SERIAL, QUEUE_CAP
+          script=rose task-run --command-key=index4
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+
+      [[bamSumamryDK2_{{ sample }}]]
+          inherit = SAMTOOLS, PBS_SERIAL, QUEUE_CAP
+          script=rose task-run --command-key=bamSummaryDK2
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+
+      [[coverageBed_{{ sample }}]]
+          inherit = BEDTOOLS, PBS_SERIAL, QUEUE_CAP
+          script=rose task-run --command-key=coverageBed
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+
+      [[hapCaller_{{ sample }}]]
+          inherit = GATK, PBS_WORKQ_1, QUEUE_CAP, HAP_DONE
+          script=rose task-run --command-key=hapCaller
+          [[[environment]]]
+              SAMPLE_ID = {{ sample }}
+              N_CPUS = {{ N_CPUS_WORKQ }}
+
+    {% endfor %} 
+    
+      [[makelist_bam]]
+          inherit = LOGIN_NODE_TASK, QUEUE_CAP
+          command scripting = """ls -d ${WORKING_DIR}/${PROJECT_NAME}/${ALIGN_DIR}/*.b.bam > ${WORKING_DIR}/${PROJECT_NAME}/${TMP}/input_bam.list"""
+          [[[environment]]]
+              WORKING_DIR = {{ WORKING_DIR }}
+              PROJECT_NAME = {{ PROJECT_NAME }}
+              TMP = {{ TMP_DIR }}
+              ALIGN_DIR = {{ ALIGN_DIR }}
+
+      [[makelist_vcf]]
+          inherit = LOGIN_NODE_TASK, QUEUE_CAP, VCF_DONE
+          command scripting = """ls -d ${WORKING_DIR}/${PROJECT_NAME}/${TMP}/*.raw_variants.g.vcf.gz > ${WORKING_DIR}/${PROJECT_NAME}/${TMP}/CombinedGVCFList.list"""
+          [[[environment]]]
+              WORKING_DIR = {{ WORKING_DIR }}
+              PROJECT_NAME = {{ PROJECT_NAME }}
+              TMP = {{ TMP_DIR }}
+
+    {% for num in range(1,23) %} 
+
+      [[jointgeno_{{num}}]] 
+          inherit = GATK, WGP_WORKQ_1, GVCF_DONE, QUEUE_CAP
+          script=rose task-run --command-key=jointGeno
+          [[[environment]]] 
+              N_CPUS = {{ N_CPUS_WORKQ }}
+              CHR = {{ num }}
+
+    {% endfor %} 
+
+      [[makelist_vcf_2]]
+          inherit = LOGIN_NODE_TASK, QUEUE_CAP
+          command scripting = """ls -d ${WORKING_DIR}/${PROJECT_NAME}/${TMP}/AllSubject.GenotypeJoint.chr*.raw.vcf > ${WORKING_DIR}/${PROJECT_NAME}/${TMP}/Combined_jgeno_List.list"""
+          [[[environment]]]
+              WORKING_DIR = {{ WORKING_DIR }}
+              PROJECT_NAME = {{ PROJECT_NAME }}
+              TMP = {{ TMP_DIR }}
+
+      [[catvariants]] 
+        inherit = GATK, PBS_WORKQ_1, QUEUE_CAP
+        script=rose task-run --command-key=catvariants
+                      
+      [[vqsrSNP]] 
+        inherit = GATK, PBS_WORKQ_1, QUEUE_CAP
+        script=rose task-run --command-key=vqsrSNP
+        [[[environment]]] 
+            N_CPUS = {{ N_CPUS_WORKQ }}
+
+      [[applyVSQRsnp]]
+        inherit = GATK, PBS_WORKQ_1, QUEUE_CAP
+        script=rose task-run --command-key=applyVSQRsnp
+        [[[environment]]] 
+            N_CPUS = {{ N_CPUS_WORKQ }}
+
+      [[vsqrIndel]]
+        inherit = GATK, PBS_WORKQ_1, QUEUE_CAP
+        script=rose task-run --command-key=vsqrIndel
+        [[[environment]]] 
+            N_CPUS = {{ N_CPUS_WORKQ }}
+
+      [[applyVSQRindel]]
+        inherit = GATK, PBS_WORKQ_1, QUEUE_CAP
+        script=rose task-run --command-key=applyVSQRindel
+        [[[environment]]] 
+            N_CPUS = {{ N_CPUS_WORKQ }}
+
+      [[posteriors]]
+        inherit = GATK, PBS_SERIAL, QUEUE_CAP
+        script=rose task-run --command-key=posteriors
+
+      [[variantFilter]]
+        inherit = GATK, PBS_SERIAL, QUEUE_CAP
+        script=rose task-run --command-key=variantFilter
+
+      [[variantAnnotator]]
+        inherit = GATK, PBS_WORKQ_1, QUEUE_CAP
+        script=rose task-run --command-key=variantAnnotator
+        [[[environment]]] 
+            N_CPUS = {{ N_CPUS_WORKQ }}
+
+
+            
+
